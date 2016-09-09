@@ -16,11 +16,14 @@ import (
 )
 
 const IGNORE_FILE = ".gitignore"
+var conf Configuration = readConfiguration()
+//singleRepo = conf.SingleRepo
 
 type Configuration struct {
 	SvnUrl string
 	SvnDir string
 	GitDir string
+	SingleRepo bool
 }
 
 func readConfiguration() (Configuration){
@@ -44,14 +47,39 @@ Si hay conflicto
   - git svn rebase
   - git rebase --continue
   - git svn dcommit
-
 */
-
 func addTrailingSlash(path string) string {
 	if strings.Index(path, "/") != len(path) {
 		path = path + "/"
 	}
 	return path
+}
+
+/*
+Recibe una lista de comandos a ser ejecutados
+y retorna una lista de lineas de output
+*/
+func executeCommand(args ...string) []string {
+	head := args[0]
+	parts := args[1:len(args)]
+	cmd := exec.Command(head, parts...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		log.Println("Error: ", err)
+	}
+	outLines := strings.Split(out.String(), "\n")
+	return outLines
+}
+
+func executeCommandOnDir(dir string, args ...string) []string{
+	error := os.Chdir(dir)
+	if error != nil {
+		log.Fatal(error)
+	}
+	outLines := executeCommand(args...)
+	return outLines
 }
 
 /*
@@ -82,11 +110,11 @@ y luego copia los archivos del zip
 func gitSVNClone(svnUrl string, localRepo string, gitRepo string) {
 	//iterar en la copia local: NO TIENE QUE HABER NINGUN CAMBIO SIN PUBLICARSE
 	//clonar cada item de la iteracion con git-svn
+	//TODO ignorar ciertos directorios .svn 
 	files, _ := ioutil.ReadDir(localRepo)
 	for _, f := range files {
 		if f.IsDir() {
-			fmt.Println("Ejecutando el comando: ")
-			
+			fmt.Println("Ejecutando el comando: ")	
 			fmt.Println("git svn clone " + 
 				svnUrl + f.Name(),
 				gitRepo+f.Name())
@@ -94,8 +122,7 @@ func gitSVNClone(svnUrl string, localRepo string, gitRepo string) {
 				"svn",
 				"clone",
 				svnUrl + f.Name(),
-				gitRepo+f.Name())
-
+				gitRepo + f.Name())
 			for _, line := range outLines {
 				fmt.Println(line)
 			}
@@ -103,16 +130,25 @@ func gitSVNClone(svnUrl string, localRepo string, gitRepo string) {
 	}
 }
 
+func overrideClonedRepository(svnDir string, gitDir string){
+	fmt.Println("Copiando y sobreescribiendo con los datos locales.")
+	svnDir = addTrailingSlash(svnDir)
+	gitDir = addTrailingSlash(gitDir)	
+	//iterar por los directorios y copiarlos de a uno
+	files, _ := ioutil.ReadDir(gitDir)
+	for _, f := range files {
+		fmt.Println("cp", "-rf ", svnDir + f.Name(), gitDir)
+		cpCmd := exec.Command("cp", "-rf", svnDir + f.Name(), gitDir)
+		cpErr := cpCmd.Run()
+		if cpErr != nil {
+			log.Println("Error: ", cpErr)
+		}
+	}
+}
+
 /* sobreescribte todos los archivos del repositorio
 con la copia actual proveniente del zip*/
-func overrideClonedRepository(svnDir string, gitDir string) {
-	fmt.Println("Copiando y sobreescribiendo con los datos locales.")
-	cpCmd := exec.Command("cp", "-rf", svnDir, gitDir)
-	cpErr := cpCmd.Run()
-	if cpErr != nil {
-		log.Println("Error: ", cpErr)
-	}
-
+func removeSVNData(svnDir string, gitDir string) {
 	fmt.Println("eliminando svn metadata")
 	files, _ := ioutil.ReadDir(gitDir)
 	for _, f := range files {
@@ -122,43 +158,41 @@ func overrideClonedRepository(svnDir string, gitDir string) {
 				log.Fatal(error)
 			}
 			currentDir, error := os.Getwd()
-			gitCmdStr := fmt.Sprintf("rm -rf $(find %s/%s -type d -name .svn", gitDir, currentDir)
+			gitCmdStr := fmt.Sprintf("rm -rf $(find %s/ -type d -name .svn", currentDir)
 			rmCmd := exec.Command(gitCmdStr)
 			rmErr := rmCmd.Run()
 			if rmErr != nil {
 				log.Println("Error: ", rmErr)
 			}
-
 		}
 	}
 }
 
-func setupLocalRepo(svnUrl string, localRepo string, gitRepo string) {
-	localRepo = addTrailingSlash(localRepo)
-	gitRepo = addTrailingSlash(gitRepo)
-	gitSVNClone(svnUrl, localRepo, gitRepo)
-	overrideClonedRepository(localRepo, gitRepo)
-}
-
 func listGitChanges(gitDir string) {
-	//recorre los subdirectorios e imprime los cambios en cada subproyecto git	
-	results := walkAndExecuteCommand(gitDir, "git", "status")
-	for gitRepo, outLines := range results{
-		//ignoramos este repo si no hay cambios
-		if len(outLines) > 2 && outLines[1] != "nothing to commit, working directory clean" {
-			fmt.Println("Cambios en: " + gitRepo)
-			fmt.Println("---------------------------------")
-			for index, output := range outLines{
-				if index == 0{
-					fmt.Println("-> ", output)  
-				}else{
-					fmt.Println(index, output)
-					
-				}
-			}
-			fmt.Println("")
+	//recorre los subdirectorios e imprime los cambios en cada subproyecto git
+	if(conf.SingleRepo){
+		results := executeCommandOnDir(gitDir, "git", "status", "-s")
+		for _, output := range results {
+			fmt.Println("-> ", output)  
 		}
-	}	
+	}else{
+		results := walkAndExecuteCommand(gitDir, "git", "status", "-s")
+		for gitRepo, outLines := range results{
+			//ignoramos este repo si no hay cambios
+			if len(outLines) > 2 && outLines[1] != "nothing to commit, working directory clean" {
+				fmt.Println("Cambios en: " + gitRepo)
+				fmt.Println("---------------------------------")
+				for index, output := range outLines{
+					if index == 0 {
+						fmt.Println("-> ", output)  
+					}else{
+						fmt.Println(output)					
+					}
+				}
+				fmt.Println("")
+			}
+		}
+	}
 }
 
 // codigo nim
@@ -179,45 +213,78 @@ func revertAssumeUnchangedFiles() {
 //TODO:
 }
 
-/*
-Recibe una lista de comandos a ser ejecutados
-y retorna una lista de lineas de output
-*/
-func executeCommand(args ...string) []string {
-	head := args[0]
-	parts := args[1:len(args)]
-	cmd := exec.Command(head, parts...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
-	if err != nil {
-		log.Println("Error: ", err)
+func manageFilesToIgnore(dir string) {
+	error := os.Chdir(dir)
+	if error != nil {
+		log.Fatal(error)
 	}
-	outLines := strings.Split(out.String(), "\n")
-	return outLines
+	var results []string
+	outLines := executeCommand("git", "status", "-s")
+	for _, outline := range outLines {
+		line := strings.TrimSpace(outline)
+		if strings.Index(line, "D") == 0 {
+			//D en la primera posicion
+			fmt.Println("deleted file -->", line)
+		} else if strings.Index(line, "D") == 0 {
+			fmt.Println("git",
+				"update-index",
+				"--assume-unchanged",
+				line[2: len(line)])
+			results = executeCommand("git",
+				"update-index",
+				"--assume-unchanged",
+				line[2: len(line)])
+		}else if strings.Index(line, "M") == 0 {
+			fmt.Println("git",
+				"update-index",
+				"--assume-unchanged",
+				line[2: len(line)])
+			results = executeCommand("git",
+				"update-index",
+				"--assume-unchanged",
+				line[2: len(line)])
+			//fmt.Println("Changed file -->", line)
+		} else if strings.Index(line, "??") == 0 {
+			//?? para archivos nuevos
+			//escribimos a .gitignore
+			fmt.Println("TODO")
+		}
+		for _, result:= range results{
+			fmt.Println(result)
+		}
+	}
 }
 
 func tuneGITRepo(gitDir string) {
-	files, _ := ioutil.ReadDir(gitDir)
-	for _, f := range files {
-		if f.IsDir() {
-			error := os.Chdir(gitDir + "/" + f.Name())
-			if error != nil {
-				log.Fatal(error)
-			}
-			//currentDir, error := os.Getwd()
-			outLines := executeCommand("git", "status", "-s")
-
-			for _, line := range outLines {
-				if strings.Index(line, "D") == 0 {
-					//D en la primera posicion
-					fmt.Println("deleted file -->", line)
-				} else if strings.Index(line, "??") == 0 {
-					//?? para archivos nuevos
-					fmt.Println("Changed file -->", line)
-				}
+	if(conf.SingleRepo) {
+		manageFilesToIgnore(gitDir)
+	}else {
+		files, _ := ioutil.ReadDir(gitDir)
+		for _, f := range files {
+			if f.IsDir() {
+				manageFilesToIgnore(gitDir + "/" + f.Name())
 			}
 		}
+	}
+}
+
+func setupLocalRepo(svnUrl string, localRepo string, gitRepo string) {
+	localRepo = addTrailingSlash(localRepo)
+	gitRepo = addTrailingSlash(gitRepo)
+	gitSVNClone(svnUrl, localRepo, gitRepo)
+	//overrideClonedRepository(localRepo, gitRepo)
+}
+
+func updateLocalRepo(gitDir string){
+	//ejecuta git svn rebase en cada repo
+	if(conf.SingleRepo){
+		results := executeCommandOnDir(gitDir, "git", "svn", "rebase")
+		for _, output := range results {
+			fmt.Println("-> ", output)
+		}
+	}else{
+		results := walkAndExecuteCommand(gitDir, "git", "svn", "rebase")
+		fmt.Println(results)
 	}
 }
 
@@ -234,21 +301,20 @@ func printHelp() {
 func main() {
 	var mainCmd string
 
-	
 	if len(os.Args) <= 1 {
 		mainCmd = "--help"
 	} else {
 		mainCmd = os.Args[1]
 	}
-
-	conf := readConfiguration()
+	
 	switch mainCmd {
 	case "--help":
 		printHelp()
 	case "--crear-repo":
 		setupLocalRepo(conf.SvnUrl, conf.SvnDir, conf.GitDir)
 	case "--ignorar-cambios":
-		fmt.Println("TODO: unimplemented command.")
+		//fmt.Println("TODO: unimplemented command.")
+		tuneGITRepo(conf.GitDir)
 	case "--listar-ignorados":
 		fmt.Println("TODO: unimplemented command.")
 	case "--agregar-archivo":
@@ -257,6 +323,9 @@ func main() {
 		listGitChanges(conf.GitDir)
 	case "--sobreescribir-repo-git":
 		overrideClonedRepository(conf.SvnDir, conf.GitDir)
+		//removeSVNData(conf.SvnDir, conf.GitDir)
+	case "--actualizar":
+		updateLocalRepo(conf.GitDir)
 	default:
 		fmt.Println("Error: argumentos equivocados.")
 		fmt.Println("")
